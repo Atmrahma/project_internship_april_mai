@@ -1,0 +1,550 @@
+---
+title: "Script_DM"
+author: "Rahma"
+date: "2023-04-24"
+output: html_document
+---
+
+# Loading the dataset 
+```{r}
+reads <- read.csv("C:/Users/atmra/Downloads/reads_filtres.csv", header = TRUE)
+
+```
+
+## Some genes were not detected at all in these samples. We will discard them.
+# get colnames as vector
+```{r}
+samples <- as.vector(colnames(reads))
+```
+
+# associate a phenotype to the samples
+```{r}
+associer_phenotype <- function(samples) {
+  phenotypes <- ifelse(grepl("A", samples), "Act", 
+                       ifelse(grepl("C", samples), "Ctrl", NA))
+  return(phenotypes)
+}
+
+
+```
+
+# apply associer_phenotype to our vector to associate a phenotype for each sample
+```{r}
+phenotypes <- sapply(samples, associer_phenotype)
+```
+# phenotypic dataframe
+```{r}
+df <- data.frame(Samples = samples, Phenotypes = phenotypes, stringsAsFactors = FALSE)
+```
+# associate a gender to the samples
+```{r}
+gender_ <- function(samples) {
+  gender <- ifelse(grepl("F", samples), "Female", 
+                       ifelse(grepl("M", samples), "Male", NA))
+  return(gender)
+}
+
+
+```
+
+# apply gender_ to our vector to associate a gender for each sample
+```{r}
+gender <- sapply(samples, gender_)
+```
+# update dataframe
+```{r}
+df$Gender <- gender 
+```
+# remove the first line unwanted
+```{r}
+df <- df[-1,]
+```
+# Count the number of samples for each class
+```{r}
+## Count the number of samples in each class
+table(df$Phenotypes)
+```
+# 1) Reads filter
+# Order the columns by increasing numbers 
+```{r}
+# Order the columns by increasing numbers
+order <- mixedsort(x = colnames(reads))
+# New table with ordered columns
+reads <- reads[, order]
+
+```
+# Calculate the sum of the reads for each line
+```{r}
+sum_reads <- rowSums(reads[,-1]) # La colonne 1 contient les noms de gènes et doit être exclue
+
+```
+# Identify the lines where the sum of the reads is equal to 10, 50 and 100.
+```{r}
+lines_to_remove10 <- sum_reads < 10
+lines_to_remove50 <- sum_reads < 50
+lines_to_remove100 <- sum_reads < 100
+
+```
+# Delete the rows where the sum of the reads is equal to 10, 50 and 100
+```{r}
+reads_filter10 <- subset(reads, !lines_to_remove10)
+reads_filter50 <- subset(reads, !lines_to_remove50)
+reads_filter100 <- subset(reads, !lines_to_remove100)
+```
+
+```{r}
+library(ggplot2)
+# Créer un graphique montrant le nombre de lignes restantes après chaque filtre
+ggplot(data.frame(num_filtre = c(1, 2, 3), num_lignes = c(nrow(reads_filter10), nrow(reads_filter50), nrow(reads_filter100))), aes(x = num_filtre, y = num_lignes)) +
+  geom_bar(stat = "identity") +
+  xlab("Numéro du filtre") +
+  ylab("Nombre de lignes restantes")
+```
+```{r}
+# Créer un vecteur pour les filtres
+filtres <- c("0", "10", "50", "100")
+num_lignes = c(nrow(reads),nrow(reads_filter10), nrow(reads_filter50), nrow(reads_filter100))
+# Tracer la courbe
+plot(num_lignes ~ filtres, type = "b", xlab = "Filter by reads", ylab = "Number of genes", col= "purple3")
+```
+*interpretation*
+by increasing the filtering parameter from 10 to 100, we notice that the number of reads decreases, reaches 9672 for the genes which have reads of more than 100 reads
+
+
+# 1] Using a filter with 50:
+## Data visualization:
+
+
+```{r}
+## Define a specific color for each phenotype and for each gender,
+## and add it as a supplementary column to the phenotypic data
+col.samples <- c(Act="green4",Ctrl ="orange4", Male= "blue4", Female="red4") 
+df$color <- col.samples[as.vector(df$Phenotypes)]
+```
+# Distributions
+
+```{r}
+count_reads <- reads_filter50[,-1]
+rownames(count_reads) <- reads_filter50$Gene_id
+```
+
+
+*Histograms of counts per gene*
+```{r}
+hist(as.matrix(count_reads), col="blue", border="white", breaks=30)
+```
+```{r}
+hist(as.matrix(count_reads), col="orange", border="white",
+     breaks=500000, xlim=c(0,150), main="Counts per gene",
+     xlab="Counts (truncated axis)", ylab="Frequency", 
+     las=1, cex.axis=0.7)
+```
+```{r}
+
+epsilon <- 1 # pseudo-count to avoid problems with log(0)
+hist(as.matrix(log2(count_reads + epsilon)), breaks=30, col="red", border="white",
+     main="Log2-transformed counts per gene", xlab="log2(counts+1)", ylab="Frenquency", 
+     las=1, cex.axis=0.7)
+```
+# Interpretation
+- The top histogram is not very informative so far, apparently due to the presence of a few very high count values, that impose a very large scale on the X axis.
+- The middle histogram shows the representative range. Note the height of the first bin, which includes the zero counts.
+- The logarithmic transformation (bottom histogram) improves the readability. Note that we added a pseudo-count of 1 to avoid problems with the log transformation of zero counts (which gives −∞).
+
+# Boxplots of gene count distributions per sample
+To get better insights into the distribution per sample.
+```{r}
+boxplot(log2(count_reads + epsilon), col=df$color, pch=".", 
+        horizontal=TRUE, cex.axis=0.5,
+        las=1, ylab="Samples", xlab="log2(Counts +1)")
+
+```
+
+# Eliminating undetected genes
+```{r}
+prop.null <- apply(count_reads, 2, function(x) 100*mean(x==0))
+print(head(prop.null))
+```
+
+
+```{r}
+barplot(prop.null, main="Percentage of null counts per sample", 
+        horiz=TRUE, cex.names=0.5, las=1, 
+        col=df$color, ylab='Samples', xlab='% of null counts')
+
+```
+# Differential analysis with DESeq2
+```{r}
+## Install the library if needed then load it
+if (!require("BiocManager", quietly = TRUE)){
+    install.packages("BiocManager")
+    BiocManager::install()
+}
+
+if(!require("lazyeval")){
+  install.packages("lazyeval")
+}
+
+if(!require("DESeq2")){
+  BiocManager::install("DESeq2")
+}
+
+library("DESeq2")
+```
+## Data normalization:
+## RPM Normalization
+**Calculate the total number of reads for each sample**
+```{r}
+total_reads <- colSums(count_reads)
+```
+
+CPM (Counts per million) is a basic gene expression unit that normalizes only for sequencing depth (depth-normalized counts). CPM is also known as RPM (Reads per million).
+
+The CPM is biased in some applications where the gene length influences gene expression, such as RNA-seq.
+
+CPM is calculated by dividing the mapped reads count by a per million scaling factor of total mapped reads.
+
+```{r}
+# Divide the number of reads for each sample by the total number of reads, multiply by 1,000,000 and round to 2 decimal places to get the number of reads per million
+data_rpm <- round(count_reads / total_reads * 1000000, 2)
+```
+
+```{r}
+# Use the number of reads per million to normalize the data
+normalized_data_rpm <- log2(data_rpm + 1)
+```
+
+*NB* 
+The reason for adding 1 to data_rpm before taking the logarithm is to avoid taking the logarithm of zero. If a value of data_rpm is zero, then we could not calculate its logarithm because log(0) is undefined. By adding 1, we ensure that the smallest value of data_rpm will be 1, and thus that all values can be transformed by the logarithm.
+```{r}
+hist(normalized_data_rpm[,2])
+```
+# create the histogram of each column
+```{r}
+
+# Number of columns in the data frame
+n_cols <- ncol(count_reads)
+
+# For loop to create the histogram of each column
+for (i in 1:n_cols) {
+  hist(normalized_data_rpm[,i], main = paste("Distribution de la colonne", i))
+}
+
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(normalized_data_rpm, aes(x = normalized_data_rpm$X05FA.2, fill="cyan4")) + 
+  geom_histogram()+scale_fill_manual(values = c("cyan4"))
+```
+# TMM Normalization:
+
+```{r}
+# convert our data to a matrix data
+count_matrix <- as.matrix(count_reads)
+
+# Charge the library
+library(edgeR)
+
+# Estimate the normalisation TMM factors
+tmm_factors <- calcNormFactors(count_matrix)
+
+# Use TMM  factors to normalize counts across all samples
+normalized_TMM <- cpm(count_matrix, normalized.lib.size=tmm_factors)
+
+```
+
+# DESeq Normalization:
+
+```{r}
+# Create a DESeqDataSet object from the data
+cn <- as.matrix(count_reads)
+
+
+## Use the DESeqDataSetFromMatrix to create a DESeqDataSet object
+dds <- DESeqDataSetFromMatrix(countData = count_reads, colData = df[colnames(count_reads),], design = ~ 1)
+print(dds)
+
+# Estimate the size factors
+dds <- estimateSizeFactors(dds)
+
+# Extract the normalized counts
+normalized_counts_deseq <- counts(dds, normalized=TRUE)
+
+# Use the normalized counts to normalize the data
+normalized_deseq <- log2(normalized_counts_deseq + 1)
+```
+Basically, i did 3 methods of normalization (RPM, TMM, Deseq)
+
+# counting different samples
+```{r}
+
+# count the number of females in activity
+FA <- nrow(subset(df, df$Gender == "Female" & Phenotypes == "Act"))
+
+# count the number of inactive females
+FC <- nrow(subset(df, Gender == "Female" & Phenotypes == "Ctrl"))
+
+# count the number of active males
+MA <- nrow(subset(df, Gender == "Male" & Phenotypes == "Act"))
+
+# count the number of inactive males
+MC <-nrow(subset(df, Gender == "Male" & Phenotypes == "Ctrl"))
+```
+
+# Create subsets
+**Using RMP normalization**
+
+*1) Active females*
+```{r}
+
+# Create a vector with the desired column names for the active females cluster
+colnames_act_females <- colnames(normalized_data_rpm)[substr(colnames(normalized_data_rpm), 4, 4) == "F" & substr(colnames(normalized_data_rpm), 5, 5) == "A"]
+
+# Extract the columns corresponding to the column names in the vector colnames_females_active
+active_females <- normalized_data_rpm[, colnames_act_females]
+dim(active_females)
+
+```
+
+*2) Inactive females*
+```{r}
+
+# Create a vector with the desired column names for the active females cluster
+colnames_inact_females <- colnames(normalized_data_rpm)[substr(colnames(normalized_data_rpm), 4, 4) == "F" & substr(colnames(normalized_data_rpm), 5, 5) == "C"]
+
+# Extract the columns corresponding to the column names in the vector colnames_females_active
+inactive_females <- normalized_data_rpm[, colnames_inact_females]
+dim(inactive_females)
+
+```
+
+*3) active males*
+```{r}
+
+# Create a vector with the desired column names for the active females cluster
+colnames_act_males <- colnames(normalized_data_rpm)[substr(colnames(normalized_data_rpm), 4, 4) == "M" & substr(colnames(normalized_data_rpm), 5, 5) == "A"]
+
+# Extract the columns corresponding to the column names in the vector colnames_females_active
+active_males <- normalized_data_rpm[, colnames_act_males]
+dim(inactive_males)
+
+```
+
+*4) Inactive males*
+```{r}
+
+# Create a vector with the desired column names for the active females cluster
+colnames_inact_males <- colnames(normalized_data_rpm)[substr(colnames(normalized_data_rpm), 4, 4) == "M" & substr(colnames(normalized_data_rpm), 5, 5) == "C"]
+
+# Extract the columns corresponding to the column names in the vector colnames_females_active
+inactive_males <- normalized_data_rpm[, colnames_inact_males]
+dim(inactive_males)
+
+```
+# Calculate the mean of each replicat
+
+# Let me start by Active females: 
+*1) Acrive females:*
+```{r}
+nb_col <- ncol(active_females)+1
+# Create a new table to store the results
+active_females_mean <- data.frame(matrix(0, nrow = nrow(active_females), 
+                                    ncol = nb_col / 5)) 
+
+# Rename the columns of the new table with the common names of the samples
+sample_names <- unique(substr(colnames(active_females), 1, 5)) #1 to 5 are the indexes for the common colnames
+colnames(active_females_mean) <- sample_names
+row.names(active_females_mean) <- row.names(active_females)
+
+```
+
+```{r}
+# Iterating on samples
+for (sample in sample_names) {
+  # Select replicate columns for the current sample
+  sample_cols <- grep(sample, colnames(active_females)) # "grep" finds occurrences of a given pattern in a string vector, and returns the corresponding indices or values.
+  
+  # Calculate the average replicates for each line (gene) for the current sample
+  active_females_mean[sample] <- rowMeans(active_females[, sample_cols])
+}
+
+# Show result
+print(active_females_mean)
+
+```
+# choose the optimal number of clusters
+```{r}
+library(cluster)
+library(factoextra)
+```
+*Using Elbow method *
+```{r}
+#create plot of number of clusters vs total within sum of squares
+fviz_nbclust(active_females_mean, kmeans, method = "wss")
+```
+*Using Silhouette method*
+```{r}
+#create plot of number of clusters vs total within sum of squares
+fviz_nbclust(active_females_mean, kmeans, method = "silhouette")
+```
+# Doing the clusering with Mfuzz
+
+```{r}
+library(Mfuzz)
+BiocGenerics::path
+detach("package:Mfuzz", unload = TRUE)
+library(ggplot2)
+library(DESeq2)
+library(Biobase)
+```
+# Select clustering parameters
+#Clusters for Active_females
+```{r}
+# Convert data frame to a matrix, then to ExpressionSet
+active_females_matrix <- as.matrix(active_females_mean)
+k_max <- 30 # max number of clusters to test
+error <- numeric(k_max) # vector to store the mean square error
+for (k in 2:k_max) {
+  expression_counts <-  ExpressionSet(assayData=active_females_matrix)
+  # Perform clustering for each number of clusters
+  my_clusters <- mfuzz(expression_counts, c = k, m = 1.25)
+  
+  
+  # Calculate the mean square error for each clustering
+  error[k] <- sum(my_clusters$centers)/nrow(expression_counts)
+}
+clts <- clusters$cluster
+```
+The calculation of the mean square error (or MSE) is a commonly used measure to evaluate the quality of a clustering. The MSE represents the sum of the squares of the distances between each point and the center of its cluster.
+
+```{r}
+# Plot the error curve
+plot(1:k_max, error, type = "b", xlab = "nb of clusters", ylab = "Mean squar error Error", col="red4")
+
+# Identify the optimal number of clusters visually
+```
+
+
+```{r}
+mfuzz.plot(expression_counts,my_clusters,mfrow=c(3,1), time.labels= colnames(active_females_mean) ,min.mem=0,new.window=F)
+```
+
+
+
+
+```{r}
+library("FactoMineR")
+library("factoextra")
+PCA(active_females_mean, scale.unit = TRUE, ncp = 5, ind.sup = NULL, 
+    quanti.sup = NULL, quali.sup = NULL, row.w = NULL, 
+    col.w = NULL, graph = TRUE, axes = c(1,2))
+library("FactoMineR")
+res.pca <- PCA(active_females_mean, graph = FALSE)
+fviz_eig(res.pca, addlabels = TRUE, ylim = c(0, 50))
+```
+*2) Inactive females:*
+```{r}
+# Create a new table to store the results
+inactive_females_mean <- data.frame(matrix(0, nrow = nrow(inactive_females), 
+                                    ncol = nb_col / 5)) 
+
+# Rename the columns of the new table with the common names of the samples
+sample_names2 <- unique(substr(colnames(inactive_females), 1, 5)) #1 to 5 are the indexes for the common colnames
+colnames(inactive_females_mean) <- sample_names2
+row.names(inactive_females_mean) <- row.names(inactive_females)
+
+```
+
+```{r}
+# Iterating on samples
+for (sample in sample_names2) {
+  # Select replicate columns for the current sample
+  sample_cols2 <- grep(sample, colnames(inactive_females)) # "grep" finds occurrences of a given pattern in a string vector, and returns the corresponding indices or values.
+  
+  # Calculate the average replicates for each line (gene) for the current sample
+  inactive_females_mean[sample] <- rowMeans(inactive_females[, sample_cols2])
+}
+
+# Show result
+print(inactive_females_mean)
+
+```
+# choose the optimal number of clusters
+*Using Elbow method *
+```{r}
+#create plot of number of clusters vs total within sum of squares
+fviz_nbclust(inactive_females_mean, kmeans, method = "wss")
+```
+*3) Active males:*
+
+```{r}
+nb_col_males <- ncol(active_males)
+# Create a new table to store the results
+active_males_mean <- data.frame(matrix(0, nrow = nrow(active_males), 
+                                    ncol = nb_col / 5)) 
+
+# Rename the columns of the new table with the common names of the samples
+sample_names3 <- unique(substr(colnames(active_males), 1, 5)) #1 to 5 are the indexes for the common colnames
+colnames(active_males_mean) <- sample_names3
+row.names(active_males_mean) <- row.names(active_males)
+
+```
+
+```{r}
+# Iterating on samples
+for (sample in sample_names3) {
+  # Select replicate columns for the current sample
+  sample_cols3 <- grep(sample, colnames(active_males)) # "grep" finds occurrences of a given pattern in a string vector, and returns the corresponding indices or values.
+  
+  # Calculate the average replicates for each line (gene) for the current sample
+  active_males_mean[sample] <- rowMeans(active_males[, sample_cols3])
+}
+
+# Show result
+print(active_males_mean)
+
+```
+# choose the optimal number of clusters
+*Using Elbow method *
+```{r}
+#create plot of number of clusters vs total within sum of squares
+fviz_nbclust(active_males_mean, kmeans, method = "wss")
+```
+*3) inactive males:*
+
+```{r}
+# Create a new table to store the results
+inactive_males_mean <- data.frame(matrix(0, nrow = nrow(inactive_males), 
+                                    ncol = nb_col / 5)) 
+
+# Rename the columns of the new table with the common names of the samples
+sample_names4 <- unique(substr(colnames(inactive_males), 1, 5)) #1 to 5 are the indexes for the common colnames
+colnames(inactive_males_mean) <- sample_names4
+row.names(inactive_males_mean) <- row.names(inactive_males)
+
+```
+
+```{r}
+# Iterating on samples
+for (sample in sample_names4) {
+  # Select replicate columns for the current sample
+  sample_cols4 <- grep(sample, colnames(inactive_males)) # "grep" finds occurrences of a given pattern in a string vector, and returns the corresponding indices or values.
+  
+  # Calculate the average replicates for each line (gene) for the current sample
+  inactive_males_mean[sample] <- rowMeans(inactive_males[, sample_cols4])
+}
+
+# Show result
+print(inactive_males_mean)
+
+```
+# choose the optimal number of clusters
+*Using Elbow method *
+```{r}
+#create plot of number of clusters vs total within sum of squares
+fviz_nbclust(inactive_males_mean, kmeans, method = "wss")
+```
+
+

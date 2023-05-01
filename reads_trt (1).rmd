@@ -1,0 +1,47 @@
+---
+title: "count_DM"
+author: "Rahma ATM"
+date: "2023-04-18"
+output: html_document
+---
+
+```{r}
+reads <- read.table("/home/rahma/Downloads/rawCounts_Lib1.csv", header = TRUE)
+
+```
+
+```{r}
+reads_filtres <- subset(reads, reads$Gene_id >= 10)
+
+
+```
+# Calculate the sum of the reads for each line
+```{r}
+sum_reads <- rowSums(reads[,-1]) # La colonne 1 contient les noms de gènes et doit être exclue
+
+```
+# Identify the lines where the sum of the reads is equal to 0.
+```{r}
+lines_to_remove <- sum_reads == 0
+
+```
+# Delete the rows where the sum of the reads is equal to 0
+```{r}
+reads_filtres <- subset(reads, !lines_to_remove)
+
+```
+# Create a new csv 
+```{r}
+write.csv(reads_filtres, "/home/rahma/Downloads/reads_filtres.csv", row.names = FALSE)
+```
+
+```{r}
+
+
+```
+```{r}
+library(edgeR)
+library(ggplot2)
+```
+
+

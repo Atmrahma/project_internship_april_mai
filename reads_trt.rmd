@@ -1,0 +1,443 @@
+---
+title: "count_DM"
+author: "Rahma ATM"
+date: "2023-04-18"
+output: html_document
+---
+# Loading the dataset 
+```{r}
+reads <- read.csv("C:/Users/atmra/Downloads/reads_filtres.csv", header = TRUE)
+
+```
+
+## Some genes were not detected at all in these samples. We will discard them.
+# get colnames as vector
+```{r}
+samples <- as.vector(colnames(reads))
+```
+
+# get a phenotypic data
+```{r}
+associer_phenotype <- function(samples) {
+  phenotypes <- ifelse(grepl("A", samples), "Act", 
+                       ifelse(grepl("C", samples), "Ctrl", NA))
+  return(phenotypes)
+}
+
+
+```
+# apply associer_phenotype to our vector to associate a phenotype for each sample
+```{r}
+phenotypes <- sapply(samples, associer_phenotype)
+```
+# phenotypic dataframe
+```{r}
+df <- data.frame(Samples = samples, Phenotypes = phenotypes, stringsAsFactors = FALSE)
+```
+# remove the first line unwanted
+```{r}
+df <- df[-1,]
+```
+
+
+```{r}
+## Count the number of sample in each class
+table(df$Phenotypes)
+```
+
+```{r}
+## Define a strain-specific color for each sample,
+## and add it as a supplementary column to the phenotypic data
+col.samples <- c(Act="blue",Ctrl ="orange") 
+df$color <- col.samples[as.vector(df$Phenotypes)]
+```
+# Descriptive statistics
+
+# to have an idea about the summary
+```{r}
+head(summary(reads[,1:4]))
+
+```
+# Distributions
+
+```{r}
+count_reads <- reads[,-1]
+rownames(count_reads) <- reads$Gene_id
+```
+
+*Histograms of counts per gene*
+```{r}
+hist(as.matrix(count_reads), col="blue", border="white", breaks=30)
+```
+
+
+```{r}
+hist(as.matrix(count_reads), col="orange", border="white",
+     breaks=500000, xlim=c(0,150), main="Counts per gene",
+     xlab="Counts (truncated axis)", ylab="Number of genes", 
+     las=1, cex.axis=0.7)
+```
+
+```{r}
+epsilon <- 1 # pseudo-count to avoid problems with log(0)
+hist(as.matrix(log2(count_reads + epsilon)), breaks=30, col="red", border="white",
+     main="Log2-transformed counts per gene", xlab="log2(counts+1)", ylab="Number of genes", 
+     las=1, cex.axis=0.7)
+```
+# Interpretation
+- The top histogram is not very informative so far, apparently due to the presence of a few very high count values, that impose a very large scale on the X axis.
+- The middle histogram shows the representative range. Note the height of the first bin, which includes the zero counts.
+- The logarithmic transformation (bottom histogram) improves the readability. Note that we added a pseudo-count of 1 to avoid problems with the log transformation of zero counts (which gives −∞).
+
+# Boxplots of gene count distributions per sample
+To get better insights into the distribution per sample.
+```{r}
+boxplot(log2(count_reads + epsilon), col=df$color, pch=".", 
+        horizontal=TRUE, cex.axis=0.5,
+        las=1, ylab="Samples", xlab="log2(Counts +1)")
+
+```
+# Density plots
+```{r}
+## Density
+## We will require some functions from the reshape2 and ggplot2 packages
+count_melt <- reshape2::melt(log2(count_reads + epsilon))
+head(count_melt)
+```
+```{r}
+library(ggplot2)
+ggplot(data=count_melt, mapping=aes(x=value, color=variable)) + geom_density()
+```
+Densities of log2(counts). Each curve corresponds to one sample.
+# Scatter plots
+
+```{r}
+nb.pairs <- 15
+
+
+## Define a function to draw a scatter plot for a pair of variables (samples) with density colors
+plotFun <- function(x,y){ 
+  dns <- densCols(x,y); 
+  points(x,y, col=dns, pch=".", panel.first=grid());  
+#  abline(a=0, b=1, col="brown")
+  }
+
+## Plot the scatter plot for a few pairs of variables selected at random
+set.seed(123) # forces the random number generator to produce fixed results. Should generally not be used, except for the sake of demonstration with a particular selection. 
+pairs(log2(count_reads[,sample(ncol(count_reads), nb.pairs)] + epsilon), 
+      panel=plotFun, lower.panel = NULL)
+
+```
+# Eliminating undetected genes
+```{r}
+prop.null <- apply(count_reads, 2, function(x) 100*mean(x==0))
+print(head(prop.null))
+```
+```{r}
+barplot(prop.null, main="Percentage of null counts per sample", 
+        horiz=TRUE, cex.names=0.5, las=1, 
+        col=df$color, ylab='Samples', xlab='% of null counts')
+
+```
+# Differential analysis with DESeq2
+```{r}
+## Install the library if needed then load it
+if (!require("BiocManager", quietly = TRUE)){
+    install.packages("BiocManager")
+    BiocManager::install()
+}
+
+if(!require("lazyeval")){
+  install.packages("lazyeval")
+}
+
+if(!require("DESeq2")){
+  BiocManager::install("DESeq2")
+}
+
+library("DESeq2")
+```
+
+```{r}
+nb.replicates <- 20 ## Each attendee chooses a number (3,4,5,10,15 or 20)
+
+samples.Act <- sample(1:99, size=nb.replicates, replace=FALSE)
+
+## Random sampling of the Snf2 replicates (columns 49 to 96)
+samples.Ctrl <- sample(99:198, size=nb.replicates, replace=FALSE)
+
+selected.samples <- c(samples.Act, samples.Ctrl)
+
+# Don't forget to update colors
+col.pheno.selected <- df$color[selected.samples]
+```
+
+```{r}
+## Use the DESeqDataSetFromMatrix to create a DESeqDataSet object
+dds0 <- DESeqDataSetFromMatrix(countData = count_reads[,selected.samples ], colData = df[selected.samples,], design = ~ Phenotypes)
+print(dds0)
+```
+# Normalisation
+```{r}
+## Normalizing using the method for an object of class"CountDataSet" 
+dds.norm <-  estimateSizeFactors(dds0)
+sizeFactors(dds.norm)
+```
+
+
+```{r}
+## Now get the scaling factor with our homemade function.cds.norm
+head(estimSf(dds0)) 
+```
+
+```{r}
+## Checking the normalization
+par(mfrow=c(1,2),cex.lab=0.7)
+
+boxplot(log2(counts(dds.norm)+epsilon),  col=col.pheno.selected, cex.axis=0.7, 
+        las=1, xlab="log2(counts)", horizontal=TRUE, main="Raw counts")
+boxplot(log2(counts(dds.norm, normalized=TRUE)+epsilon),  col=col.pheno.selected, cex.axis=0.7, 
+        las=1, xlab="log2(normalized counts)", horizontal=TRUE, main="Normalized counts") 
+```
+```{r}
+if(!require("patchwork")){
+  install.packages("patchwork")
+}
+library(reshape2)
+p1 <- ggplot(data=count_melt, mapping=aes(x=value, color=variable)) + geom_density() +  theme(legend.position = "none")
+count_norm_melt <- melt(log2(counts(dds.norm, normalized=TRUE)+epsilon))
+head(count_norm_melt)
+```
+```{r}
+p2 <- ggplot(data=count_norm_melt, mapping=aes(x=value, color=Var2)) + geom_density() + theme(legend.position = "none")
+p1 + p2
+```
+```{r}
+## Computing mean and variance
+rownames(dds.norm) <- reads$Gene_id 
+norm.counts <- counts(dds.norm, normalized=TRUE)
+mean.counts <- rowMeans(norm.counts)
+variance.counts <- apply(norm.counts, 1, var)
+
+## sum(mean.counts==0) # Number of completely undetected genes
+
+norm.counts.stats <- data.frame(
+  min=apply(norm.counts, 2, min),
+  mean=apply(norm.counts, 2, mean),
+  median=apply(norm.counts, 2, median),
+  max=apply(norm.counts, 2, max),
+  zeros=apply(norm.counts==0, 2, sum),
+  percent.zeros=100*apply(norm.counts==0, 2, sum)/nrow(norm.counts),
+  perc05=apply(norm.counts, 2, quantile, 0.05),
+  perc10=apply(norm.counts, 2, quantile, 0.10),
+  perc90=apply(norm.counts, 2, quantile, 0.90),
+  perc95=apply(norm.counts, 2, quantile, 0.95)
+)
+
+#kable(norm.counts.stats)
+```
+
+```{r}
+## Mean and variance relationship
+mean.var.col <- densCols(x=log2(mean.counts), y=log2(variance.counts))
+plot(x=log2(mean.counts), y=log2(variance.counts), pch=16, cex=0.5, 
+     col=mean.var.col, main="Mean-variance relationship",
+     xlab="Mean log2(normalized counts) per gene",
+     ylab="Variance of log2(normalized counts)",
+     panel.first = grid())
+abline(a=0, b=1, col="brown")
+```
+
+
+# Modelling read counts through a negative binomial
+```{r}
+## Performing estimation of dispersion parameter
+dds.disp <- estimateDispersions(dds.norm)
+
+## A diagnostic plot which
+## shows the mean of normalized counts (x axis)
+## and dispersion estimate for each genes
+plotDispEsts(dds.disp)
+```
+```{r}
+## Performing estimation of dispersion parameter
+dds.disp <- estimateDispersions(dds.norm)
+
+## A diagnostic plot which
+## shows the mean of normalized counts (x axis)
+## and dispersion estimate for each genes
+plotDispEsts(dds.disp)
+head(dds.disp)
+```
+
+# Performing differential expression call
+```{r}
+alpha <- 0.0001
+wald.test <- nbinomWaldTest(dds.disp)
+res.DESeq2 <- results(wald.test, alpha=alpha, pAdjustMethod="BH")
+
+## What is the object returned by nbinomTest()
+class(res.DESeq2)
+head(res.DESeq2)
+```
+
+```{r}
+head(res.DESeq2)
+```
+
+```{r}
+## Order the table by decreasing p-valuer
+res.DESeq2 <- res.DESeq2[order(res.DESeq2$padj),]
+head(res.DESeq2)
+```
+
+
+```{r}
+## Draw an histogram of the p-values
+hist(res.DESeq2$pvalue, breaks=20, col="cyan4", main="DESeq2 p-value distribution", xlab="DESeq2 P-value", ylab="Number of genes")
+```
+# Volcano plot
+```{r}
+alpha <- 0.005 # Threshold on the adjusted p-value
+cols <- densCols(res.DESeq2$log2FoldChange, -log10(res.DESeq2$pvalue))
+plot(res.DESeq2$log2FoldChange, -log10(res.DESeq2$pvalue), col=c("#94C5DF", "cyan3"), panel.first=grid(),
+     main="Volcano plot", xlab="Effect size: log2(fold-change)", ylab="-log10(adjusted p-value)",
+     pch=20, cex=0.6)
+abline(v=0)
+abline(v=c(-1,1), col="brown")
+abline(h=-log10(alpha), col="brown")
+
+gn.selected <- abs(res.DESeq2$log2FoldChange) > 2 & res.DESeq2$pvalue < alpha 
+text(res.DESeq2$log2FoldChange[gn.selected],
+     -log10(res.DESeq2$pvalue)[gn.selected],
+     lab=rownames(res.DESeq2)[gn.selected ], cex=0.4)
+```
+# Check the expression levels of the most differentially expressed gene
+```{r}
+gn.most.sign <- rownames(res.DESeq2)[1]
+gn.most.diff.val <- counts(dds.norm, normalized=T)[gn.most.sign,]
+barplot(gn.most.diff.val, col=col.pheno.selected, main=gn.most.sign, las=2, cex.names=0.5)
+```
+Barplot of the counts per sample fr a selected gene.
+# Looking at the results with a MA plot
+```{r}
+## Draw a MA plot.
+## Genes with adjusted p-values below 1% are shown
+plotMA(res.DESeq2, colNonSig = "blue")
+abline(h=c(-1:1), col="red")
+```
+MA plot. The abcsissa indicates the mean of normalized counts; the ordinate the log2(fold-change).
+
+# Hierarchical clustering
+To ensure that the selected genes distinguish well between “Ctrl”” and “Act” condition we will perform a hierachical clustering
+
+```{r}
+## We select gene names based on FDR (1%)
+gene.kept <- rownames(res.DESeq2)[res.DESeq2$padj <= alpha & !is.na(res.DESeq2$padj)]
+
+## We retrieve the normalized counts for gene of interest
+count_reads.kept <- log2(count_reads + epsilon)[gene.kept, ]
+dim(count_reads.kept)
+```
+```{r}
+library(Mfuzz)
+BiocGenerics::path
+detach("package:Mfuzz", unload = TRUE)
+library(ggplot2)
+library(DESeq2)
+
+
+```
+```{r}
+countData <- assay(dds0)
+
+```
+
+```{r}
+logC <- log2(countData + 1)
+
+```
+ # 2nd methode to normalize our data
+```{r}
+library(edgeR)
+
+factors <- calcNormFactors(count_reads)
+norm_count_matrix <- t(t(count_reads) / factors)
+#head(norm_count_matrix)
+```
+
+```{r}
+# Sélectionner les paramètres de clustering
+k_max <- 10 # nombre maximal de clusters à tester
+error <- numeric(k_max) # vecteur pour stocker l'erreur quadratique moyenne
+for (k in 2:k_max) {
+  exprs_counts <-  ExpressionSet(assayData=norm_count_matrix)
+  # Effectuer le clustering pour chaque nombre de clusters
+  clusters <- mfuzz(exprs_counts, c = k, m = 1.25)
+  
+  
+  # Calculer l'erreur quadratique moyenne pour chaque clustering
+  error[k] <- sum(clusters$centers)/nrow(exprs_counts)
+}
+clts <- clusters$cluster
+
+```
+
+Le calcul de l'erreur quadratique moyenne (ou EQM) est une mesure couramment utilisée pour évaluer la qualité d'un clustering. L'EQM représente la somme des carrés des distances entre chaque point et le centre de son cluster.
+```{r}
+# Tracer la courbe d'erreur
+plot(1:k_max, error, type = "b", xlab = "nb of clusters", ylab = "Erreur quadratique moyenne")
+
+# Identifier le nombre optimal de clusters visuellement
+```
+
+```{r}
+
+# Visualisation des clusters
+
+# Tracez les graphiques des clusters
+plot(clusters$cluster, main="Clustering en 10 clusters")
+```
+
+
+
+```{r}
+library(pheatmap)
+
+# Create a heatmap of gene expression values, sorted by cluster membership
+hcluster()
+
+pheatmap(exprs_counts, cluster_rows = FALSE, show_rownames = FALSE, 
+         cluster_cols = as.dendrogram(clusters$membership), col = colorRampPalette(c("blue", "white", "red"))(50))
+
+
+
+```
+
+```{r}
+deGenes <- rownames(res.DESeq2[which(res.DESeq2$padj < 0.05),])
+logC <- logC[deGenes,]
+cmeans(exprs(eset), centers = centers, method = "cmeans", m = m)
+
+
+```
+
+```{r}
+# Order the columns by increasing numbers
+new_order <- mixedsort(x = colnames(count_reads))
+# New table with ordered columns
+new_df <- count_reads[, new_order]
+
+```
+
+```{r}
+time_point <- colnames(new_df)
+mfuzz.plot(exprs_counts,clusters,mfrow=c(2,1), time.labels= time_point ,min.mem=0,new.window=TRUE)
+```
+# Separate control samples and activity samples
+```{r}
+Act_col <- grepl("^A", colnames(new_df))
+Ctrl_col <- grepl("^C", colnames(new_df))
+
+```
+
